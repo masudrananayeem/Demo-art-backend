@@ -12,44 +12,44 @@ const readCache = new Map();
 const readInFlight = new Map();
 
 const LIST_TTL_MS = {
-  products: 300_000,
-  categories: 300_000,
-  subcategories: 300_000,
-  siteContent: 300_000,
-  adminUsers: 120_000,
+  products: 30_000,
+  categories: 60_000,
+  subcategories: 60_000,
+  siteContent: 60_000,
+  adminUsers: 60_000,
   adminRequests: 15_000,
-  users: 120_000,
-  orders: 30_000,
-  messages: 30_000,
-  paymentSettings: 300_000,
-  storeSettings: 300_000,
-  memberships: 120_000,
-  membershipRequests: 120_000,
+  users: 30_000,
+  orders: 5_000,
+  messages: 5_000,
+  paymentSettings: 60_000,
+  storeSettings: 60_000,
+  memberships: 15_000,
+  membershipRequests: 15_000,
   coinRules: 60_000,
-  circulation: 120_000,
-  contactSubmissions: 120_000,
-  auditLogs: 120_000,
+  circulation: 15_000,
+  contactSubmissions: 10_000,
+  auditLogs: 10_000,
 };
 
 const GET_TTL_MS = {
-  adminUsers: 120_000,
-  users: 120_000,
-  siteContent: 300_000,
-  categories: 300_000,
-  subcategories: 300_000,
-  storeSettings: 300_000,
-  paymentSettings: 300_000,
-  memberships: 120_000,
-  coinRules: 300_000,
+  adminUsers: 60_000,
+  users: 30_000,
+  siteContent: 60_000,
+  categories: 60_000,
+  subcategories: 60_000,
+  storeSettings: 60_000,
+  paymentSettings: 60_000,
+  memberships: 15_000,
+  coinRules: 60_000,
 };
 
 const QUERY_TTL_MS = {
-  messages: 30_000,
-  orders: 30_000,
-  circulation: 120_000,
-  membershipRequests: 120_000,
-  users: 120_000,
-  products: 300_000,
+  messages: 5_000,
+  orders: 5_000,
+  circulation: 10_000,
+  membershipRequests: 10_000,
+  users: 15_000,
+  products: 15_000,
 };
 
 function cloneCached(value) {
@@ -81,41 +81,6 @@ function clearDocumentCache(env, path) {
   const project = projectIdOf(env);
   readCache.delete(cacheKey(project, "get", path));
   clearCollectionCache(env, splitCollectionPath(path));
-}
-
-const NOTIFICATION_SECTIONS = new Set(["products","categories","subcategories","orders","messages","homepage","payments"]);
-const NOTIFICATION_COLLECTION_TO_SECTION = {
-  products: "products",
-  categories: "categories",
-  subcategories: "subcategories",
-  orders: "orders",
-  messages: "messages",
-  siteContent: "homepage",
-  storeSettings: "payments",
-};
-
-async function bumpAdminNotification(env, collection) {
-  const section = NOTIFICATION_COLLECTION_TO_SECTION[collection];
-  if (!section) return;
-  try {
-    const token = await getAccessToken(env);
-    const docName = `${baseUrl(env)}/adminNotificationState/state`;
-    const stamp = new Date().toISOString();
-    const res = await fetch(`${baseUrl(env)}:commit`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        writes: [{
-          update: { name: docName, fields: { [section]: { stringValue: stamp } } },
-          updateMask: { fieldPaths: [section] },
-        }],
-      }),
-    });
-    if (!res.ok) return;
-    clearDocumentCache(env, "adminNotificationState");
-  } catch (_) {
-    // Notification dots are non-critical and must never break the real mutation.
-  }
 }
 
 function invalidateTransactionWrites(env, writes) {
@@ -321,7 +286,6 @@ export async function fsCreate(env, collection, data, id) {
   const doc = await res.json();
   const saved = { id: idFromName(doc.name), updateTime: doc.updateTime, ...fromFirestoreDoc(doc) };
   clearCollectionCache(env, collection);
-  await bumpAdminNotification(env, collection);
   return saved;
 }
 
@@ -348,7 +312,6 @@ export async function fsPatch(env, path, data, expectedUpdateTime) {
   const doc = await res.json();
   const saved = { id: idFromName(doc.name), updateTime: doc.updateTime, ...fromFirestoreDoc(doc) };
   clearDocumentCache(env, path);
-  await bumpAdminNotification(env, splitCollectionPath(path));
   return saved;
 }
 
@@ -394,11 +357,6 @@ export async function fsRunTransaction(env, callback, maxAttempts = 5) {
       });
       if (commit.ok) {
         invalidateTransactionWrites(env, writes);
-        // Checkout/stock transactions touch both orders and products. Only the
-        // order change is a user-visible admin notification; avoiding a second
-        // notification write for product stock keeps write amplification low.
-        const touchesOrder = writes.some((write) => String(write?.update?.name || write?.delete || "").includes("/documents/orders/"));
-        if (touchesOrder) await bumpAdminNotification(env, "orders");
         return result?.value;
       }
       const text = await commit.text();
@@ -431,7 +389,6 @@ export async function fsDelete(env, path) {
   });
   if (!res.ok && res.status !== 404) throw new Error(`Firestore DELETE ${path} failed: ${await res.text()}`);
   clearDocumentCache(env, path);
-  await bumpAdminNotification(env, splitCollectionPath(path));
 }
 
 // Query documents in `collection` where `field` == `value`.
@@ -461,111 +418,4 @@ export async function fsQueryEquals(env, collection, field, value, options = {})
     const rows = await res.json();
     return rows.filter((r) => r.document).map((r) => ({ id: idFromName(r.document.name), updateTime: r.document.updateTime, ...fromFirestoreDoc(r.document) }));
   }, ttl > 0);
-}
-
-
-function buildFieldFilter(field, op, value) {
-  return { fieldFilter: { field: { fieldPath: field }, op, value: toFirestoreValue(value) } };
-}
-
-function buildWhere(filters) {
-  const list = Array.isArray(filters) ? filters.filter(Boolean) : [];
-  if (!list.length) return undefined;
-  if (list.length === 1) return buildFieldFilter(list[0].field, list[0].op || "EQUAL", list[0].value);
-  return { compositeFilter: { op: "AND", filters: list.map((f) => buildFieldFilter(f.field, f.op || "EQUAL", f.value)) } };
-}
-
-export async function fsAggregate(env, collection, aggregations, options = {}) {
-  const ttl = options.cache === false ? 0 : (options.ttlMs ?? 120_000);
-  const key = cacheKey(projectIdOf(env), "aggregate", `${collection}|${JSON.stringify(options.filters || [])}|${JSON.stringify(aggregations)}`);
-  return cachedRead(key, ttl, async () => {
-    const token = await getAccessToken(env);
-    const structuredQuery = { from: [{ collectionId: collection }] };
-    const where = buildWhere(options.filters);
-    if (where) structuredQuery.where = where;
-    const res = await fetch(`${baseUrl(env)}:runAggregationQuery`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        structuredAggregationQuery: {
-          structuredQuery,
-          aggregations: aggregations.map((item) => {
-            const op = item.type || "count";
-            if (op === "sum" || op === "avg") return { alias: item.alias, [op]: { field: { fieldPath: item.field } } };
-            return { alias: item.alias, count: {} };
-          }),
-        },
-      }),
-    });
-    if (!res.ok) throw new Error(`Firestore AGGREGATE ${collection} failed: ${await res.text()}`);
-    const rows = await res.json();
-    const result = rows.find((row) => row.result)?.result?.aggregateFields || {};
-    const out = {};
-    for (const item of aggregations) out[item.alias] = fromFirestoreValue(result[item.alias]);
-    return out;
-  }, ttl > 0);
-}
-
-export async function fsGetAdminNotificationState(env, options = {}) {
-  return fsGet(env, "adminNotificationState/state", { ttlMs: options.ttlMs ?? 30_000 });
-}
-
-export async function fsListPage(env, collection, options = {}) {
-  const token = await getAccessToken(env);
-  const url = new URL(`${baseUrl(env)}/${collection}`);
-  url.searchParams.set("pageSize", String(Math.min(100, Math.max(1, Number(options.pageSize || 25)))));
-  if (options.pageToken) url.searchParams.set("pageToken", String(options.pageToken));
-  if (options.orderBy) url.searchParams.set("orderBy", String(options.orderBy));
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  if (!res.ok) throw new Error(`Firestore LIST PAGE ${collection} failed: ${await res.text()}`);
-  const data = await res.json();
-  return {
-    items: (data.documents || []).map((doc) => ({ id: idFromName(doc.name), updateTime: doc.updateTime, ...fromFirestoreDoc(doc) })),
-    nextPageToken: data.nextPageToken || null,
-  };
-}
-
-
-function encodeCursor(value) { return base64url(JSON.stringify(value)); }
-function decodeCursor(value) {
-  if (!value) return null;
-  try {
-    const text = atob(String(value).replace(/-/g, "+").replace(/_/g, "/") + "===".slice((String(value).length + 3) % 4));
-    return JSON.parse(text);
-  } catch { return null; }
-}
-
-export async function fsQueryPageEquals(env, collection, field, value, options = {}) {
-  const token = await getAccessToken(env);
-  const limit = Math.min(50, Math.max(1, Number(options.limit || 25)));
-  const cursor = decodeCursor(options.cursor);
-  const structuredQuery = {
-    from: [{ collectionId: collection }],
-    where: { fieldFilter: { field: { fieldPath: field }, op: "EQUAL", value: toFirestoreValue(value) } },
-    orderBy: [
-      { field: { fieldPath: options.orderField || "createdAt" }, direction: "DESCENDING" },
-      { field: { fieldPath: "__name__" }, direction: "DESCENDING" },
-    ],
-    limit,
-  };
-  if (cursor?.createdAt && cursor?.id) {
-    structuredQuery.startAt = {
-      before: false,
-      values: [
-        { timestampValue: cursor.createdAt },
-        { referenceValue: `${baseUrl(env)}/${collection}/${cursor.id}` },
-      ],
-    };
-  }
-  const res = await fetch(`${baseUrl(env)}:runQuery`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ structuredQuery }),
-  });
-  if (!res.ok) throw new Error(`Firestore QUERY PAGE ${collection} failed: ${await res.text()}`);
-  const rows = await res.json();
-  const items = rows.filter((r) => r.document).map((r) => ({ id: idFromName(r.document.name), updateTime: r.document.updateTime, ...fromFirestoreDoc(r.document) }));
-  const last = items[items.length - 1];
-  const nextCursor = items.length === limit && last?.createdAt ? encodeCursor({ createdAt: last.createdAt, id: last.id }) : null;
-  return { items, nextCursor };
 }
