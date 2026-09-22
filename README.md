@@ -180,5 +180,3 @@ order-creation endpoint (`POST /api/orders`) is the place to plug it in.
 | POST | `/api/orders` | user | Place an order: `{ items: [{id, qty}], shipping: {fullName, phone, line1, line2?, city, state?, zip?, country?}, paymentMethod: "cod"\|"bkash"\|"nagad", paymentRef? }`. Validates & decrements real stock. |
 | GET | `/api/orders/me` | user | Current user's purchase history |
 | GET | `/api/admin/orders` | admin | All orders |
-#   D e m o - a r t - b a c k e n d  
- 
