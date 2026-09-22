@@ -1,0 +1,14 @@
+name = "art-canvas-backend"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+
+# Non-secret config. Secrets (FIREBASE_PRIVATE_KEY, FIREBASE_CLIENT_EMAIL,
+# CLOUDINARY_API_SECRET, RESEND_API_KEY, etc.) are set with `wrangler secret put NAME` and
+# must NOT be committed here — see README.md.
+[vars]
+
+FIREBASE_PROJECT_ID = "artcanvas-29eb1"
+
+ALLOWED_ORIGINS = "https://art-canvas-frontend.pages.dev,https://art-canvas-frontend-admin.vercel.app,http://localhost:3000,http://localhost:5173"
+CLOUDINARY_CLOUD_NAME = "z9s3in7s"
+CLOUDINARY_FOLDER = "art-canvas/products"

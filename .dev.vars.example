@@ -1,0 +1,18 @@
+# Copy this file to `.dev.vars` for local `wrangler dev` (never commit .dev.vars).
+# In production, set the same names with: wrangler secret put NAME
+
+# Comma-separated browser origins. Localhost ports are also accepted automatically by the backend.
+ALLOWED_ORIGINS=http://localhost:3000,http://localhost:5173,https://art-canvas-frontend.pages.dev
+
+# From Firebase Console -> Project settings -> Service accounts -> Generate new private key
+FIREBASE_CLIENT_EMAIL=firebase-adminsdk-xxxxx@your-project.iam.gserviceaccount.com
+FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nMIIEvQ...\n-----END PRIVATE KEY-----\n"
+
+# From Cloudinary Console -> Dashboard
+CLOUDINARY_API_KEY=123456789012345
+CLOUDINARY_API_SECRET=your-cloudinary-api-secret
+
+# Transactional email (Resend)
+# Create an API key in Resend and verify the sender domain/email.
+RESEND_API_KEY=re_xxxxxxxxxxxxxxxxx
+RESEND_FROM_EMAIL=ArtCanvas <noreply@your-verified-domain.com>
