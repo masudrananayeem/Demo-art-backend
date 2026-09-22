@@ -904,64 +904,137 @@ app.get("/api/admin/notification-state", requireAdminAnyPermission(["manageProdu
 
 app.get("/api/admin/analytics", requireAdminAnyPermission(["manageOrders","managePayments"]), async (c) => {
   const year = Math.min(2100, Math.max(2000, Number(c.req.query("year") || new Date().getUTCFullYear())));
-  const months = [];
-  for (let month = 0; month < 12; month += 1) {
-    const start = new Date(Date.UTC(year, month, 1)).toISOString();
-    const end = new Date(Date.UTC(year, month + 1, 1)).toISOString();
-    const base = [
-      { field: "createdAt", op: "GREATER_THAN_OR_EQUAL", value: start },
-      { field: "createdAt", op: "LESS_THAN", value: end },
+  const cacheKey = `analytics:${year}`;
+
+  // The normal path uses Firestore aggregation queries, which are dramatically
+  // cheaper than downloading every order. If a Firebase project has not yet
+  // deployed the required composite indexes, fall back to one cached order
+  // collection read so the dashboard still works instead of returning 500.
+  // Once the supplied indexes are deployed, the optimized aggregation path is
+  // used automatically.
+  const buildFromOrders = (allOrders) => {
+    const list = Array.isArray(allOrders) ? allOrders : [];
+    const months = Array.from({ length: 12 }, (_, month) => {
+      const start = Date.UTC(year, month, 1);
+      const end = Date.UTC(year, month + 1, 1);
+      const rows = list.filter((order) => {
+        const time = Date.parse(order?.createdAt || "");
+        return Number.isFinite(time) && time >= start && time < end;
+      });
+      const deliveredRows = rows.filter((order) => order?.status === "delivered");
+      const salesRows = rows.filter((order) => order?.status !== "cancelled");
+      return {
+        month: new Date(Date.UTC(year, month, 1)).toLocaleString("en-US", { month: "short", timeZone: "UTC" }),
+        income: deliveredRows.reduce((sum, order) => sum + Number(order?.total || 0), 0),
+        sales: salesRows.reduce((sum, order) => sum + Number(order?.total || 0), 0),
+        orders: salesRows.length,
+        deliveredOrders: deliveredRows.length,
+      };
+    });
+    const statusCounts = ["placed", "confirmed", "processing", "shipped", "delivered", "cancelled"].map((status) => ({
+      key: status === "placed" ? "pending" : status,
+      count: list.filter((order) => order?.status === status).length,
+    }));
+    const paymentMethods = ["cod", "bkash", "nagad", "card"];
+    const paymentData = paymentMethods.map((method) => ({
+      method: method === "cod" ? "Cash on delivery" : method,
+      revenue: list
+        .filter((order) => order?.status === "delivered" && String(order?.paymentMethod || "").toLowerCase() === method)
+        .reduce((sum, order) => sum + Number(order?.total || 0), 0),
+    }));
+    return {
+      year,
+      months,
+      statusCounts,
+      paymentData,
+      productCount: null,
+      unreadMessages: null,
+      fallback: true,
+    };
+  };
+
+  try {
+    const months = [];
+    for (let month = 0; month < 12; month += 1) {
+      const start = new Date(Date.UTC(year, month, 1)).toISOString();
+      const end = new Date(Date.UTC(year, month + 1, 1)).toISOString();
+      const base = [
+        { field: "createdAt", op: "GREATER_THAN_OR_EQUAL", value: start },
+        { field: "createdAt", op: "LESS_THAN", value: end },
+      ];
+      const [delivered, sales] = await Promise.all([
+        fsAggregate(c.env, "orders", [
+          { alias: "income", type: "sum", field: "total" },
+          { alias: "deliveredOrders", type: "count" },
+        ], { filters: [...base, { field: "status", op: "EQUAL", value: "delivered" }], ttlMs: 300_000 }),
+        fsAggregate(c.env, "orders", [
+          { alias: "sales", type: "sum", field: "total" },
+          { alias: "salesOrders", type: "count" },
+        ], { filters: [...base, { field: "status", op: "NOT_EQUAL", value: "cancelled" }], ttlMs: 300_000 }),
+      ]);
+      months.push({
+        month: new Date(Date.UTC(year, month, 1)).toLocaleString("en-US", { month: "short", timeZone: "UTC" }),
+        income: Number(delivered.income || 0),
+        sales: Number(sales.sales || 0),
+        orders: Number(sales.salesOrders || 0),
+        deliveredOrders: Number(delivered.deliveredOrders || 0),
+      });
+    }
+
+    const statusFilters = [
+      ["placed", "pending"], ["confirmed", "confirmed"], ["processing", "processing"],
+      ["shipped", "shipped"], ["delivered", "delivered"], ["cancelled", "cancelled"],
     ];
-    const [delivered, sales] = await Promise.all([
-      fsAggregate(c.env, "orders", [
-        { alias: "income", type: "sum", field: "total" },
-        { alias: "deliveredOrders", type: "count" },
-      ], { filters: [...base, { field: "status", op: "EQUAL", value: "delivered" }], ttlMs: 300_000 }),
-      fsAggregate(c.env, "orders", [
-        { alias: "sales", type: "sum", field: "total" },
-        { alias: "salesOrders", type: "count" },
-      ], { filters: [...base, { field: "status", op: "NOT_EQUAL", value: "cancelled" }], ttlMs: 300_000 }),
+    const statusCounts = await Promise.all(statusFilters.map(async ([status, key]) => ({
+      key,
+      count: Number((await fsAggregate(c.env, "orders", [{ alias: "count", type: "count" }], { filters: [{ field: "status", op: "EQUAL", value: status }], ttlMs: 300_000 })).count || 0),
+    })));
+    const paymentMethods = ["cod", "bkash", "nagad", "card"];
+    const paymentData = await Promise.all(paymentMethods.map(async (method) => {
+      const result = await fsAggregate(c.env, "orders", [{ alias: "revenue", type: "sum", field: "total" }], {
+        filters: [{ field: "status", op: "EQUAL", value: "delivered" }, { field: "paymentMethod", op: "EQUAL", value: method }],
+        ttlMs: 300_000,
+      });
+      return { method: method === "cod" ? "Cash on delivery" : method, revenue: Number(result.revenue || 0) };
+    }));
+    const [productCount, unreadMessages] = await Promise.all([
+      fsAggregate(c.env, "products", [{ alias: "count", type: "count" }], { ttlMs: 300_000 }),
+      fsAggregate(c.env, "messages", [{ alias: "count", type: "count" }], { filters: [
+        { field: "from", op: "EQUAL", value: "user" },
+        { field: "seenByAdmin", op: "EQUAL", value: false },
+      ], ttlMs: 60_000 }),
     ]);
-    months.push({
-      month: new Date(Date.UTC(year, month, 1)).toLocaleString("en-US", { month: "short", timeZone: "UTC" }),
-      income: Number(delivered.income || 0),
-      sales: Number(sales.sales || 0),
-      orders: Number(sales.salesOrders || 0),
-      deliveredOrders: Number(delivered.deliveredOrders || 0),
+    return c.json({
+      year,
+      months,
+      statusCounts,
+      paymentData,
+      productCount: Number(productCount.count || 0),
+      unreadMessages: Number(unreadMessages.count || 0),
+      fallback: false,
     });
+  } catch (error) {
+    const message = String(error?.message || error);
+    if (/FAILED_PRECONDITION|requires an index|index/i.test(message)) {
+      const allOrders = await fsList(c.env, "orders");
+      const fallback = buildFromOrders(allOrders);
+      // Product/message cards remain available when their lightweight counts
+      // can be read. These are independently cached and do not require indexes.
+      try {
+        const [productCount, unreadMessages] = await Promise.all([
+          fsAggregate(c.env, "products", [{ alias: "count", type: "count" }], { ttlMs: 300_000 }),
+          fsAggregate(c.env, "messages", [{ alias: "count", type: "count" }], { filters: [
+            { field: "from", op: "EQUAL", value: "user" },
+            { field: "seenByAdmin", op: "EQUAL", value: false },
+          ], ttlMs: 60_000 }),
+        ]);
+        fallback.productCount = Number(productCount.count || 0);
+        fallback.unreadMessages = Number(unreadMessages.count || 0);
+      } catch (_) {}
+      return c.json(fallback);
+    }
+    throw error;
   }
-  const statusFilters = [
-    ["placed", "pending"], ["confirmed", "confirmed"], ["processing", "processing"],
-    ["shipped", "shipped"], ["delivered", "delivered"], ["cancelled", "cancelled"],
-  ];
-  const statusCounts = await Promise.all(statusFilters.map(async ([status, key]) => ({
-    key,
-    count: Number((await fsAggregate(c.env, "orders", [{ alias: "count", type: "count" }], { filters: [{ field: "status", op: "EQUAL", value: status }], ttlMs: 300_000 })).count || 0),
-  })));
-  const paymentMethods = ["cod", "bkash", "nagad", "card"];
-  const paymentData = [];
-  for (const method of paymentMethods) {
-    const result = await fsAggregate(c.env, "orders", [{ alias: "revenue", type: "sum", field: "total" }], {
-      filters: [{ field: "status", op: "EQUAL", value: "delivered" }, { field: "paymentMethod", op: "EQUAL", value: method }],
-      ttlMs: 300_000,
-    });
-    paymentData.push({ method: method === "cod" ? "Cash on delivery" : method, revenue: Number(result.revenue || 0) });
-  }
-  const [productCount, unreadMessages] = await Promise.all([
-    fsAggregate(c.env, "products", [{ alias: "count", type: "count" }], { ttlMs: 300_000 }),
-    fsAggregate(c.env, "messages", [{ alias: "count", type: "count" }], { filters: [
-      { field: "from", op: "EQUAL", value: "user" },
-      { field: "seenByAdmin", op: "EQUAL", value: false },
-    ], ttlMs: 60_000 }),
-  ]);
-  return c.json({
-    year,
-    months,
-    statusCounts,
-    paymentData,
-    productCount: Number(productCount.count || 0),
-    unreadMessages: Number(unreadMessages.count || 0),
-  });
 });
 
 app.get("/api/admin/orders/page", requireAdminAnyPermission(["manageOrders","managePayments"]), async (c) => {
