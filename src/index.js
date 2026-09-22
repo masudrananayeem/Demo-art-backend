@@ -896,7 +896,7 @@ app.get("/api/admin/notification-state", requireAdminAnyPermission(["manageProdu
     const created = await fsCreate(c.env, "adminNotificationState", {
       products: now, categories: now, subcategories: now, orders: now,
       messages: now, homepage: now, payments: now,
-    }, "adminNotificationState");
+    }, "state");
     state = created;
   }
   return c.json(state);

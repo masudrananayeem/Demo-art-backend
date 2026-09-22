@@ -99,7 +99,7 @@ async function bumpAdminNotification(env, collection) {
   if (!section) return;
   try {
     const token = await getAccessToken(env);
-    const docName = `${baseUrl(env)}/adminNotificationState`;
+    const docName = `${baseUrl(env)}/adminNotificationState/state`;
     const stamp = new Date().toISOString();
     const res = await fetch(`${baseUrl(env)}:commit`, {
       method: "POST",
@@ -507,7 +507,7 @@ export async function fsAggregate(env, collection, aggregations, options = {}) {
 }
 
 export async function fsGetAdminNotificationState(env, options = {}) {
-  return fsGet(env, "adminNotificationState", { ttlMs: options.ttlMs ?? 30_000 });
+  return fsGet(env, "adminNotificationState/state", { ttlMs: options.ttlMs ?? 30_000 });
 }
 
 export async function fsListPage(env, collection, options = {}) {
